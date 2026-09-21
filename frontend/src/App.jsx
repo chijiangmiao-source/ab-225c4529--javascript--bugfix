@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { postAudit, fetchHealth } from './api.js';
 import LatticeOverlay from './LatticeOverlay.jsx';
 import { SAMPLE_POINTS, SAMPLE_AREA, SAMPLE_OUTLIERS } from './sampleData.js';
+import { canonicalIntText, coordKey, intTextToBigInt, isIntegerText } from './intmath.js';
 
 // Every audit request and response is tracked with a monotone id so that a
 // stale in-flight or previously displayed result can never be shown after
@@ -9,7 +10,9 @@ import { SAMPLE_POINTS, SAMPLE_AREA, SAMPLE_OUTLIERS } from './sampleData.js';
 let requestSeq = 0;
 
 export default function App() {
-  const [points, setPoints] = useState(() => SAMPLE_POINTS.map((p) => ({ ...p })));
+  const [points, setPoints] = useState(() =>
+    SAMPLE_POINTS.map((p) => ({ ...p, x: String(p.x), y: String(p.y) }))
+  );
   const [minArea, setMinArea] = useState(String(SAMPLE_AREA));
   const [maxOutliers, setMaxOutliers] = useState(String(SAMPLE_OUTLIERS));
   const [response, setResponse] = useState(null);
@@ -54,10 +57,16 @@ export default function App() {
     setLoading(true);
     setError(null);
     try {
+      // Inputs travel to the backend as arbitrary-precision BigInts; no
+      // double conversion may touch them (coordinates may exceed 2^53 - 1).
       const data = await postAudit({
-        points: points.map((p) => ({ id: p.id, x: parseInt(p.x, 10), y: parseInt(p.y, 10) })),
-        minCellArea: parseInt(minArea, 10),
-        maxOutliers: parseInt(maxOutliers, 10)
+        points: points.map((p) => ({
+          id: p.id,
+          x: intTextToBigInt(p.x),
+          y: intTextToBigInt(p.y)
+        })),
+        minCellArea: intTextToBigInt(minArea),
+        maxOutliers: intTextToBigInt(maxOutliers)
       });
       if (pendingSeq.current !== seq) return; // superseded by a newer request
       setResponse(data);
@@ -91,15 +100,27 @@ export default function App() {
   }
 
   function resetSample() {
-    setPoints(SAMPLE_POINTS.map((p) => ({ ...p })));
+    setPoints(SAMPLE_POINTS.map((p) => ({ ...p, x: String(p.x), y: String(p.y) })));
     setMinArea(String(SAMPLE_AREA));
     setMaxOutliers(String(SAMPLE_OUTLIERS));
   }
 
   const result = response && response.feasible ? response.result : null;
   const witness = response && !response.feasible ? response.witness : null;
-  const numericPoints = useMemo(
-    () => points.map((p) => ({ id: p.id, x: Number(p.x), y: Number(p.y) })),
+  // Canonical exact decimal strings handed to the presentation layer.  These
+  // are display/audit identity data -- never converted to doubles here.  The
+  // overlay is only shown for a fresh successful audit, whose inputs were
+  // necessarily valid canonical integers; the try/catch merely keeps React
+  // rendering (and showing the validation message) while an edit is invalid.
+  const exactPoints = useMemo(
+    () =>
+      points.map((p) => {
+        try {
+          return { id: p.id, x: canonicalIntText(p.x), y: canonicalIntText(p.y) };
+        } catch {
+          return { id: p.id, x: String(p.x).trim(), y: String(p.y).trim() };
+        }
+      }),
     [points]
   );
 
@@ -149,10 +170,16 @@ export default function App() {
                       <input value={p.id} onChange={(e) => updatePoint(i, 'id', e.target.value)} aria-label={`点 ${i + 1} 标识`} />
                     </td>
                     <td>
-                      <input type="number" step="1" value={p.x} onChange={(e) => updatePoint(i, 'x', e.target.value)} aria-label={`点 ${p.id} x`} />
+                      {/* type="text" + inputMode is deliberate: a
+                          type="number" input runs its value through a
+                          double-precision canonicalization (e.g. typing
+                          9007199254740993 yields 9007199254740992), which
+                          would lose exact integers at entry.  Integer-ness
+                          is enforced by validateInputs on the raw text. */}
+                      <input type="text" inputMode="numeric" pattern="[+-]?[0-9]*" value={p.x} onChange={(e) => updatePoint(i, 'x', e.target.value)} aria-label={`点 ${p.id} x`} />
                     </td>
                     <td>
-                      <input type="number" step="1" value={p.y} onChange={(e) => updatePoint(i, 'y', e.target.value)} aria-label={`点 ${p.id} y`} />
+                      <input type="text" inputMode="numeric" pattern="[+-]?[0-9]*" value={p.y} onChange={(e) => updatePoint(i, 'y', e.target.value)} aria-label={`点 ${p.id} y`} />
                     </td>
                     <td>
                       <button className="btn-small" onClick={() => removePoint(i)} disabled={points.length <= 6} title="至少保留 6 个点">
@@ -189,10 +216,10 @@ export default function App() {
           )}
 
           {response && !resultStale && result && (
-            <SuccessView result={result} examined={response.candidates_examined} points={numericPoints} />
+            <SuccessView result={result} examined={response.candidates_examined} points={exactPoints} />
           )}
           {response && !resultStale && !result && (
-            <FailureView response={response} points={numericPoints} />
+            <FailureView response={response} points={exactPoints} />
           )}
         </section>
       </div>
@@ -302,26 +329,36 @@ function validateInputs(points, minArea, maxOutliers) {
   for (const p of points) {
     if (!p.id.trim()) return '存在空标识';
     if (ids.has(p.id)) return `标识重复：${p.id}`;
-    if (!/^[+-]?\d+$/.test(String(p.x).trim()) || !/^[+-]?\d+$/.test(String(p.y).trim())) {
+    if (!isIntegerText(p.x) || !isIntegerText(p.y)) {
       return `点 ${p.id} 的坐标必须是整数`;
     }
-    const key = `${p.x}|${p.y}`;
-    if (coords.has(key)) return `点 ${p.id} 坐标重复 (${p.x}, ${p.y})`;
+    // Uniqueness is decided on the canonical decimal value, never on a
+    // rounded float: distinct integers beyond 2^53-1 must stay distinct.
+    const key = coordKey(p.x, p.y);
+    if (coords.has(key)) return `点 ${p.id} 坐标重复 (${canonicalIntText(p.x)}, ${canonicalIntText(p.y)})`;
     coords.add(key);
     ids.add(p.id);
   }
-  if (!/^\d+$/.test(String(minArea).trim())) return '最小面积必须为正整数';
-  const a = Number(minArea);
-  if (a < 2 || a > 1_000_000) return '最小晶胞面积必须在 2 至 1000000 之间';
-  const k = Number(maxOutliers);
-  if (!Number.isInteger(k) || k < 0 || k > 3) return '离群上限必须在 0 至 3 之间';
+  if (!isIntegerText(minArea)) return '最小面积必须为正整数';
+  const a = intTextToBigInt(minArea);
+  if (a < 2n || a > 1_000_000n) return '最小晶胞面积必须在 2 至 1000000 之间';
+  if (!/^\d+$/.test(String(maxOutliers).trim())) return '离群上限必须在 0 至 3 之间';
+  const k = intTextToBigInt(maxOutliers);
+  if (k < 0n || k > 3n) return '离群上限必须在 0 至 3 之间';
   return null;
 }
 
 function signatureFor(points, minArea, maxOutliers) {
+  const canon = (v) => {
+    try {
+      return canonicalIntText(v);
+    } catch {
+      return String(v).trim();
+    }
+  };
   return JSON.stringify({
-    points: points.map((p) => [p.id, String(p.x), String(p.y)]),
-    a: String(minArea),
-    k: String(maxOutliers)
+    points: points.map((p) => [p.id, canon(p.x), canon(p.y)]),
+    a: canon(minArea),
+    k: canon(maxOutliers)
   });
 }

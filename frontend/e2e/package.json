@@ -1,0 +1,13 @@
+{
+  "name": "lattice-audit-e2e",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Real-browser end-to-end regression driven against the nginx-served page",
+  "scripts": {
+    "test": "node browser_audit.mjs"
+  },
+  "dependencies": {
+    "playwright": "^1.49.1"
+  }
+}

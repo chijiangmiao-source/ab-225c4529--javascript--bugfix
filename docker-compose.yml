@@ -21,9 +21,30 @@ services:
       # Host-side port is configurable: FRONTEND_PORT=9000 docker compose up -d
       - "${FRONTEND_PORT:-8080}:80"
 
+  # Real-browser one-shot regression: drives the nginx-served page with
+  # headless Chromium (Playwright) through the actual input -> "执行审计"
+  # path using coordinates beyond 2^53 - 1.  Exits non-zero on any failed
+  # assertion.  The `verify` service waits for its successful completion.
+  browser-verify:
+    build:
+      context: ./frontend
+      dockerfile: e2e/Dockerfile
+    image: lattice-audit-browser-verify:latest
+    container_name: lattice-audit-browser-verify
+    depends_on:
+      backend:
+        condition: service_healthy
+      web:
+        condition: service_healthy
+    environment:
+      WEB_URL: http://web:80
+    restart: "no"
+
   # One-shot acceptance service: runs the exact-arithmetic tests plus
   # end-to-end HTTP checks against both containers, then exits.  Its exit
-  # code is the verdict (0 pass / non-zero fail).
+  # code is the verdict (0 pass / non-zero fail).  It additionally waits for
+  # the real-browser regression (browser-verify) to finish successfully; use
+  # `docker compose run browser-verify` to run the browser stage on its own.
   verify:
     image: lattice-audit-backend:latest
     build:
@@ -34,6 +55,8 @@ services:
         condition: service_healthy
       web:
         condition: service_healthy
+      browser-verify:
+        condition: service_completed_successfully
     environment:
       BACKEND_URL: http://backend:8000
       WEB_URL: http://web:80

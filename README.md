@@ -11,12 +11,14 @@
 backend/            FastAPI 服务（精确整数求解器）
   app/lattice.py    HNF / 扩展欧几里得 / 余类原点 / 逐点整数坐标（纯整数）
   app/solver.py     枚举删除 0..K 个点的生成格，按裁决次序求最优
-  app/main.py       /health 与 POST /api/audit
+  app/main.py       /health 与 POST /api/audit（StrictInt 边界，拒绝小数 JSON）
   tests/            13 个纯标准库测试（含对拍独立全枚举的最优性验证）
   scripts/acceptance.py  compose verify 一次性验收脚本
 frontend/           React + Vite 单页应用（SVG 晶格叠加）
+  src/intmath.js    任意精度整数：规范化文本、BigInt 精确序列化/无损 JSON 解析
   src/LatticeOverlay.jsx 用返回的整数基/原点重建网格、保留点、离群点
-docker-compose.yml  backend + web + 一次性 verify 服务
+  e2e/              真实无头 Chromium（Playwright）页面提交回归（browser-verify）
+docker-compose.yml  backend + web + browser-verify + verify（后两者一次性退出）
 ```
 
 ## 运行
@@ -37,19 +39,29 @@ web 的健康检查经 nginx 反代打到后端 `/health`。
 
 ## 一次性验收服务
 
-`verify` 服务启动后自行退出，**以退出码报告结果**（0 通过，非 0 失败）：
+`verify` 服务启动后自行退出，**以退出码报告结果**（0 通过，非 0 失败）。
+它依赖 `browser-verify` 成功完成（`service_completed_successfully`），因此
+`docker compose run verify` 会先跑真实浏览器回归，再跑 HTTP/单元测试验收，
+两个阶段都通过时 verify 才以 0 退出；也可单独运行浏览器阶段：
 
 ```bash
-docker compose build verify
-docker compose run verify        # 退出码即验收结论
+docker compose build browser-verify verify
+docker compose run verify        # 退出码即验收结论（含浏览器回归）
+# 或单独执行真实页面回归：
+docker compose run browser-verify
 # 或随栈一起启动后查看：
 docker compose up --build verify
 docker inspect -f '{{.State.ExitCode}}' lattice-audit-verify
 ```
 
-验收内容：13 个精确整数单元测试 → 后端 HTTP 健康 → nginx 静态页与反代 →
-污染网格场景（面积 12、恰 3 个离群点 b0/b1/b2）→ 代理同请求结论一致 →
-不可行时的最大面积见证可复算 → 输入契约 422 → 10^18 坐标精确性。
+验收内容：前端精确整数单元测试（browser-verify 阶段）→ 真实无头浏览器
+经过页面输入 6 个超过 2^53−1 的相邻整数并点击「执行审计」→ 确认发出的请求
+仍含 6 个互异坐标、页面显示面积 2 / 保留 6 点 / 离群 0 → 后端 13 个精确
+整数单元测试 → 后端 HTTP 健康 → nginx 静态页与反代 → 污染网格场景
+（面积 12、恰 3 个离群点 b0/b1/b2）→ 代理同请求结论一致 → 不可行时的
+最大面积见证可复算 → 输入契约 422（含拒绝带小数的 JSON 坐标）→
+10^18 坐标精确性 → 2^53 边界经真实接口仍精确（面积 2、零离群，响应字节
+含完整整数数位）→ 原始缺陷检测命令以 0 / `NOT_REPRODUCED` 退出。
 
 ## 接口
 
@@ -81,6 +93,13 @@ docker inspect -f '{{.State.ExitCode}}' lattice-audit-verify
   （n=60 时 34,221 个）即完备无遗漏。
 - 全部运算为 Python 任意精度整数（HNF、扩展 gcd、整除判定、余类原点
   规范化），坐标 10^18、面积 10^36 亦精确。
+- 前端业务数据以规范化十进制文本 + BigInt 端到端传递：输入、唯一性比较、
+  请求构造（逐位序列化）、响应解析（JSON 数字按原文保留为文本，杜绝
+  `JSON.parse` 的 double 舍入）与结果表格均不经 `Number`/`parseInt`。
+  坐标输入框使用 `type="text" + inputmode="numeric"`（`type="number"`
+  自身会按 double 规范化数值，使 2^53+1 在输入时就失真）。唯一的浮点
+  转换位于 `src/LatticeOverlay.jsx` 的 SVG 投影边界，且只作用于相对于
+  窗口原点的小偏移，不回写任何业务坐标、比较或再次提交。
 - 前端在成功审计后若修改任意点（含离群点）或参数，旧图与旧结论立即失效
   （签名比对 + 置顶提示），必须重新审计后才显示新结果。
 

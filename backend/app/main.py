@@ -6,7 +6,7 @@ from typing import List
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, StrictInt
 
 from .solver import ValidationError, solve
 
@@ -22,16 +22,19 @@ app = FastAPI(
 
 class PointIn(BaseModel):
     id: str = Field(..., min_length=1, description="unique point identifier")
-    x: int
-    y: int
+    # StrictInt: JSON numbers with a fractional part (e.g. 1.0) or booleans
+    # must be rejected at the wire boundary instead of being silently coerced
+    # to integers; the solver itself accepts only true Python ints.
+    x: StrictInt
+    y: StrictInt
 
     model_config = {"extra": "forbid"}
 
 
 class AuditRequest(BaseModel):
     points: List[PointIn]
-    min_cell_area: int = Field(..., ge=2, le=1_000_000)
-    max_outliers: int = Field(..., ge=0, le=3)
+    min_cell_area: StrictInt = Field(..., ge=2, le=1_000_000)
+    max_outliers: StrictInt = Field(..., ge=0, le=3)
 
     model_config = {"extra": "forbid"}
 
