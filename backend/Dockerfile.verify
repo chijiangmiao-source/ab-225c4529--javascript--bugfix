@@ -1,0 +1,20 @@
+# One-shot acceptance image: the backend image plus a real Chromium used by
+# scripts/acceptance.py to drive the served page end to end (big-integer
+# regression must go through an actual page submission, not a direct solve
+# call).  Not used by the runtime backend/web images.
+FROM python:3.11-slim
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1
+
+WORKDIR /app
+
+COPY requirements.txt requirements.acceptance.txt ./
+RUN pip install --no-cache-dir -r requirements.txt -r requirements.acceptance.txt \
+    && python -m playwright install --with-deps chromium
+
+COPY app ./app
+COPY tests ./tests
+COPY scripts ./scripts
+
+ENTRYPOINT ["python", "scripts/acceptance.py"]

@@ -1,0 +1,5 @@
+# Extra dependencies for the one-shot `verify` service (scripts/acceptance.py).
+# Not needed by the runtime backend image.  The browser drives the real
+# served page through Chromium so the big-integer regression goes through
+# the exact same click/submit/render path a user uses.
+playwright==1.49.1

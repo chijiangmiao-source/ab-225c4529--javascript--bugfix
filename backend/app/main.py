@@ -1,13 +1,19 @@
-"""FastAPI application: exact affine-lattice audit service."""
+"""FastAPI application: exact affine-lattice audit service.
+
+All request/response integers cross the HTTP boundary as tagged exact
+integers (see :mod:`app.exact_json`), so values beyond the JavaScript
+safe-integer range survive the browser's JSON parser without rounding.
+The raw request body is decoded into arbitrary-precision Python ints
+*before* validation and solving; pydantic/JSON-number coercion is never
+in that path.
+"""
 
 from __future__ import annotations
 
-from typing import List
-
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field
+from fastapi.responses import JSONResponse, Response
 
+from .exact_json import ExactJSONError, decode_exact_json, encode_exact_json
 from .solver import ValidationError, solve
 
 app = FastAPI(
@@ -20,24 +26,13 @@ app = FastAPI(
 )
 
 
-class PointIn(BaseModel):
-    id: str = Field(..., min_length=1, description="unique point identifier")
-    x: int
-    y: int
-
-    model_config = {"extra": "forbid"}
-
-
-class AuditRequest(BaseModel):
-    points: List[PointIn]
-    min_cell_area: int = Field(..., ge=2, le=1_000_000)
-    max_outliers: int = Field(..., ge=0, le=3)
-
-    model_config = {"extra": "forbid"}
-
-
 @app.exception_handler(ValidationError)
 async def validation_error_handler(_request: Request, exc: ValidationError) -> JSONResponse:
+    return JSONResponse(status_code=422, content={"detail": str(exc)})
+
+
+@app.exception_handler(ExactJSONError)
+async def exact_json_error_handler(_request: Request, exc: ExactJSONError) -> JSONResponse:
     return JSONResponse(status_code=422, content={"detail": str(exc)})
 
 
@@ -47,10 +42,12 @@ def health() -> dict:
 
 
 @app.post("/api/audit")
-def audit(req: AuditRequest) -> dict:
-    payload = {
-        "points": [p.model_dump() for p in req.points],
-        "min_cell_area": req.min_cell_area,
-        "max_outliers": req.max_outliers,
-    }
-    return solve(payload)
+async def audit(request: Request) -> Response:
+    payload = decode_exact_json(await request.body())
+    if not isinstance(payload, dict):
+        raise ExactJSONError("request body must be a JSON object")
+    result = solve(payload)
+    return Response(
+        content=encode_exact_json(result),
+        media_type="application/json",
+    )

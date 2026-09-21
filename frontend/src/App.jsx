@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { postAudit, fetchHealth } from './api.js';
 import LatticeOverlay from './LatticeOverlay.jsx';
 import { SAMPLE_POINTS, SAMPLE_AREA, SAMPLE_OUTLIERS } from './sampleData.js';
+import { cmpInteger, isIntegerText, normalizeIntegerText } from './exact.js';
 
 // Every audit request and response is tracked with a monotone id so that a
 // stale in-flight or previously displayed result can never be shown after
@@ -55,9 +56,15 @@ export default function App() {
     setError(null);
     try {
       const data = await postAudit({
-        points: points.map((p) => ({ id: p.id, x: parseInt(p.x, 10), y: parseInt(p.y, 10) })),
-        minCellArea: parseInt(minArea, 10),
-        maxOutliers: parseInt(maxOutliers, 10)
+        // Canonical decimal strings travel untouched; api.js tags them for
+        // the exact wire boundary.  No float conversion happens here.
+        points: points.map((p) => ({
+          id: p.id,
+          x: normalizeIntegerText(p.x),
+          y: normalizeIntegerText(p.y)
+        })),
+        minCellArea: normalizeIntegerText(minArea),
+        maxOutliers: normalizeIntegerText(maxOutliers)
       });
       if (pendingSeq.current !== seq) return; // superseded by a newer request
       setResponse(data);
@@ -98,8 +105,12 @@ export default function App() {
 
   const result = response && response.feasible ? response.result : null;
   const witness = response && !response.feasible ? response.witness : null;
-  const numericPoints = useMemo(
-    () => points.map((p) => ({ id: p.id, x: Number(p.x), y: Number(p.y) })),
+  // Editor values are passed as their exact textual form; the overlay is
+  // the only layer allowed to project them onto finite SVG numbers.  No
+  // normalization here: invalid text while typing must not crash render
+  // (the overlay is only mounted for a fresh, validated audit result).
+  const exactPoints = useMemo(
+    () => points.map((p) => ({ id: p.id, x: String(p.x), y: String(p.y) })),
     [points]
   );
 
@@ -189,10 +200,10 @@ export default function App() {
           )}
 
           {response && !resultStale && result && (
-            <SuccessView result={result} examined={response.candidates_examined} points={numericPoints} />
+            <SuccessView result={result} examined={response.candidates_examined} points={exactPoints} />
           )}
           {response && !resultStale && !result && (
-            <FailureView response={response} points={numericPoints} />
+            <FailureView response={response} points={exactPoints} />
           )}
         </section>
       </div>
@@ -302,19 +313,28 @@ function validateInputs(points, minArea, maxOutliers) {
   for (const p of points) {
     if (!p.id.trim()) return '存在空标识';
     if (ids.has(p.id)) return `标识重复：${p.id}`;
-    if (!/^[+-]?\d+$/.test(String(p.x).trim()) || !/^[+-]?\d+$/.test(String(p.y).trim())) {
+    if (!isIntegerText(p.x) || !isIntegerText(p.y)) {
       return `点 ${p.id} 的坐标必须是整数`;
     }
-    const key = `${p.x}|${p.y}`;
-    if (coords.has(key)) return `点 ${p.id} 坐标重复 (${p.x}, ${p.y})`;
+    // Compare canonical decimal forms so e.g. "01" and "1" cannot slip past
+    // the string-level uniqueness check as distinct coordinates.
+    const cx = normalizeIntegerText(p.x);
+    const cy = normalizeIntegerText(p.y);
+    const key = `${cx}|${cy}`;
+    if (coords.has(key)) return `点 ${p.id} 坐标重复 (${cx}, ${cy})`;
     coords.add(key);
     ids.add(p.id);
   }
   if (!/^\d+$/.test(String(minArea).trim())) return '最小面积必须为正整数';
-  const a = Number(minArea);
-  if (a < 2 || a > 1_000_000) return '最小晶胞面积必须在 2 至 1000000 之间';
-  const k = Number(maxOutliers);
-  if (!Number.isInteger(k) || k < 0 || k > 3) return '离群上限必须在 0 至 3 之间';
+  const a = normalizeIntegerText(minArea);
+  if (cmpInteger(a, '2') < 0 || cmpInteger(a, '1000000') > 0) {
+    return '最小晶胞面积必须在 2 至 1000000 之间';
+  }
+  if (!/^\d+$/.test(String(maxOutliers).trim())) return '离群上限必须为非负整数';
+  const k = normalizeIntegerText(maxOutliers);
+  if (cmpInteger(k, '0') < 0 || cmpInteger(k, '3') > 0) {
+    return '离群上限必须在 0 至 3 之间';
+  }
   return null;
 }
 
